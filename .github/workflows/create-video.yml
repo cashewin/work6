@@ -47,124 +47,53 @@ jobs:
           echo "📊 Total images: $idx"
           ls -lh assets/
 
-          # ==========================================
-          # IMPROVED PCM TO MP3 CONVERSION
-          # ==========================================
           if [ -n "${{ github.event.client_payload.voiceover_url || '' }}" ]; then
             echo "🎤 Downloading voiceover..."
             curl -L --fail --retry 3 --retry-delay 2 -o assets/voiceover_raw "${{ github.event.client_payload.voiceover_url }}"
             
-            if [ -f assets/voiceover_raw ]; then
-              size=$(wc -c < assets/voiceover_raw)
-              echo "✅ Voiceover downloaded (${size} bytes)"
-              
-              if [ "$size" -gt 0 ]; then
-                # Check if the file is already encoded audio using ffprobe
-                codec_info=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=nk=1:nw=1 assets/voiceover_raw 2>/dev/null || echo "")
-                
-                if [ -z "$codec_info" ] || [ "$codec_info" = "none" ]; then
-                  # No audio stream detected - likely raw PCM from Gemini TTS
-                  echo "🔍 No audio codec detected - treating as raw PCM"
-                  echo "🔄 Converting PCM (16-bit signed LE, 24kHz, mono) to MP3..."
-                  echo "   Input size: ${size} bytes"
-                  echo "   Expected duration: ~$(echo "scale=1; $size / 48000" | bc)s"
-                  
-                  # PCM format from Gemini TTS: s16le (signed 16-bit little-endian), 24000 Hz, mono
-                  # Output: MP3 at 192kbps, 48000 Hz, stereo for better compatibility
-                  echo "🎵 Running FFmpeg PCM to MP3 conversion..."
-                  if ffmpeg -f s16le -ar 24000 -ac 1 -i assets/voiceover_raw \
-                      -c:a libmp3lame -b:a 192k -ar 48000 -ac 2 \
-                      -y -hide_banner assets/voiceover.mp3 2>&1 | tee /tmp/ffmpeg_convert.log; then
-                    
-                    # Validate the conversion
-                    if [ -f assets/voiceover.mp3 ] && [ -s assets/voiceover.mp3 ]; then
-                      converted_size=$(wc -c < assets/voiceover.mp3)
-                      echo "✅ PCM converted to MP3 (${converted_size} bytes)"
-                      
-                      # Verify audio is valid
-                      audio_streams=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 assets/voiceover.mp3 2>/dev/null | wc -l)
-                      audio_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null || echo "0")
-                      
-                      echo "   Audio streams: $audio_streams"
-                      echo "   Duration: ${audio_duration}s"
-                      
-                      # Accept any valid duration > 0.05s
-                      if [ "$audio_streams" -gt 0 ] && [[ "$audio_duration" =~ ^[0-9]+\.?[0-9]*$ ]] && (( $(echo "$audio_duration > 0.05" | bc -l) )); then
-                        rm -f assets/voiceover_raw
-                        echo "✅ PCM conversion verified successfully"
-                        echo "📊 Voiceover details:"
-                        ffprobe -v error -show_entries format=duration:stream=codec_name,sample_rate,channels,bit_rate -of default=noprint_wrappers=1 assets/voiceover.mp3 2>/dev/null || echo "   (details unavailable)"
-                      else
-                        echo "❌ Converted audio validation failed"
-                        echo "   Streams: $audio_streams, Duration: $audio_duration"
-                        echo "FFmpeg log:"
-                        cat /tmp/ffmpeg_convert.log || echo "(no log)"
-                        rm -f assets/voiceover.mp3 assets/voiceover_raw
-                      fi
-                    else
-                      echo "❌ MP3 file not created or is empty"
-                      echo "FFmpeg log:"
-                      cat /tmp/ffmpeg_convert.log || echo "(no log)"
-                      rm -f assets/voiceover_raw assets/voiceover.mp3
-                    fi
-                  else
-                    FFMPEG_EXIT=$?
-                    echo "❌ FFmpeg PCM conversion failed with exit code $FFMPEG_EXIT"
-                    echo "FFmpeg log:"
-                    cat /tmp/ffmpeg_convert.log || echo "(no log)"
-                    rm -f assets/voiceover_raw assets/voiceover.mp3
-                  fi
-                else
-                  # Already encoded (MP3, AAC, WAV, etc.) - just rename
-                  echo "📋 Detected audio codec: $codec_info"
-                  if [ "$codec_info" = "mp3" ]; then
-                    mv assets/voiceover_raw assets/voiceover.mp3
-                    echo "✅ Audio file ready (already MP3)"
-                  else
-                    # Other audio format - transcode to MP3
-                    echo "🔄 Transcoding $codec_info to MP3..."
-                    ffmpeg -y -i assets/voiceover_raw \
-                      -c:a libmp3lame -b:a 192k -ar 48000 \
-                      assets/voiceover.mp3 2>&1 | tee /tmp/ffmpeg_transcode.log
-                    
-                    if [ -f assets/voiceover.mp3 ] && [ -s assets/voiceover.mp3 ]; then
-                      converted_size=$(wc -c < assets/voiceover.mp3)
-                      echo "✅ Transcoded to MP3 (${converted_size} bytes)"
-                      rm -f assets/voiceover_raw
-                    else
-                      echo "❌ Failed to transcode to MP3"
-                      cat /tmp/ffmpeg_transcode.log || echo "(no log)"
-                      rm -f assets/voiceover_raw
-                    fi
-                  fi
-                fi
-                
-                # Final validation of audio file
-                if [ -f assets/voiceover.mp3 ]; then
-                  echo "🔍 Final validation of audio file..."
-                  VO_STREAMS=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 assets/voiceover.mp3 2>/dev/null | wc -l)
-                  VO_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null || echo "0")
-                  
-                  if [ $VO_STREAMS -eq 0 ]; then
-                    echo "❌ Voiceover file has no audio streams!"
-                    rm -f assets/voiceover.mp3
-                  elif ! [[ "$VO_DUR" =~ ^[0-9]+\.?[0-9]*$ ]] || [ -z "$VO_DUR" ]; then
-                    echo "❌ Voiceover has invalid duration: $VO_DUR"
-                    rm -f assets/voiceover.mp3
-                  elif (( $(echo "$VO_DUR < 0.1" | bc -l) )); then
-                    echo "❌ Voiceover duration too short: ${VO_DUR}s"
-                    rm -f assets/voiceover.mp3
-                  else
-                    echo "✅ Audio validation passed: ${VO_DUR}s duration"
-                  fi
-                fi
-              else
-                echo "⚠️  Voiceover file is empty (0 bytes)"
-                rm -f assets/voiceover_raw
-              fi
+            # Check if the file is already encoded audio using ffprobe
+            if ffprobe -v error -select_streams a -show_entries stream=codec_name -of csv=p=0 assets/voiceover_raw >/dev/null 2>&1; then
+              # Already encoded (MP3, AAC, WAV, etc.) - just rename
+              mv assets/voiceover_raw assets/voiceover.mp3
+              echo "✅ Audio file ready (already encoded)"
             else
-              echo "⚠️  Failed to download voiceover"
+              # Raw PCM data - convert to MP3
+              echo "🔄 Converting PCM to MP3..."
+              # PCM format: 16-bit signed little-endian, 24kHz, mono
+              ffmpeg -y -f s16le -ar 24000 -ac 1 -i assets/voiceover_raw \
+                -c:a libmp3lame -b:a 192k -ar 48000 \
+                assets/voiceover.mp3
+              
+              if [ $? -ne 0 ]; then
+                echo "❌ PCM to MP3 conversion failed"
+                exit 1
+              fi
+              
+              rm assets/voiceover_raw
+              echo "✅ PCM to MP3 conversion complete"
             fi
+            
+            # Validate the converted/downloaded audio file
+            echo "🔍 Validating audio file..."
+            VO_STREAMS=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 assets/voiceover.mp3 2>/dev/null | wc -l)
+            VO_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null)
+            
+            if [ $VO_STREAMS -eq 0 ]; then
+              echo "❌ Voiceover file has no audio streams!"
+              exit 1
+            elif ! [[ "$VO_DUR" =~ ^[0-9]+\.?[0-9]*$ ]] || [ -z "$VO_DUR" ]; then
+              echo "❌ Voiceover has invalid duration: $VO_DUR"
+              exit 1
+            elif (( $(echo "$VO_DUR < 0.1" | bc -l) )); then
+              echo "❌ Voiceover duration too short: ${VO_DUR}s"
+              exit 1
+            fi
+            
+            echo "✅ Audio validation passed: ${VO_DUR}s duration"
+            
+            # Log audio details for troubleshooting
+            echo "📊 Voiceover details:"
+            ffprobe -v error -show_entries format=duration:stream=codec_name,sample_rate,channels -of default=noprint_wrappers=1 assets/voiceover.mp3
           fi
 
           if [ -n "${{ github.event.client_payload.background_music_url || '' }}" ]; then
@@ -202,18 +131,8 @@ jobs:
             echo "⏱️  Using default duration: ${DURATION}s"
           fi
           
-          # Fix image dimensions to 1080x1920 (9:16 vertical)
-          mkdir -p fixed
-          for img in assets/image_*.png; do
-            if [ -f "$img" ]; then
-              # Scale to fit 1080x1920 (cover the entire frame, cropping if needed)
-              ffmpeg -y -i "$img" \
-                -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" \
-                "fixed/$(basename "$img")"
-            fi
-          done
-
-          IMG_COUNT=$(ls -1 fixed/image_*.png 2>/dev/null | wc -l)
+          # Count images (no pre-processing needed - filter_complex handles it)
+          IMG_COUNT=$(ls -1 assets/image_*.png 2>/dev/null | wc -l)
           
           if [ "$IMG_COUNT" -eq 0 ]; then
             echo "❌ No images found to process!"
@@ -252,12 +171,12 @@ jobs:
           # Build input string with proper paths
           INPUTS=""
           for i in $(seq 0 $((IMG_COUNT - 1))); do
-            INPUTS="$INPUTS -i fixed/image_$(printf '%03d' $i).png"
+            INPUTS="$INPUTS -i assets/image_$(printf '%03d' $i).png"
           done
 
           echo "🎬 Creating vertical slideshow with smooth transitions and zoom..."
           ffmpeg -y $INPUTS -filter_complex "$FILTER_COMPLEX" -map "[vout]" \
-            -c:v libx264 -pix_fmt yuv420p -preset medium -crf 23 \
+            -c:v libx264 -pix_fmt yuv420p -preset faster -crf 23 \
             -movflags +faststart -t $DURATION \
             output/temp.mp4
 
@@ -317,36 +236,35 @@ jobs:
               
               echo "✅ Subtitle file created with $((SUBTITLE_NUM - 1)) entries (perfectly synced)"
               
-              # Check if video has audio stream to avoid time_base errors
-              HAS_AUDIO_SUB=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 output/temp.mp4 2>/dev/null | wc -l)
-              
               # Apply MULTILINGUAL subtitles for supported languages
               # Using Noto Sans Bold which supports all 6 application languages
               # English, Hindi (हिन्दी), Spanish, French, German, Russian (Русский)
               # Alignment=2 (bottom-center) with MarginV=45 for proper bottom placement
+              # Check if video has audio stream to avoid time_base errors
+              HAS_AUDIO_SUB=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 output/temp.mp4 2>/dev/null | wc -l)
               if [ $HAS_AUDIO_SUB -gt 0 ]; then
                 # Video has audio, copy it
                 ffmpeg -y -i output/temp.mp4 \
                   -vf "subtitles=output/subs.srt:force_style='FontName=Noto Sans,Bold=1,FontSize=12,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BackColour=&H80000000&,BorderStyle=4,Outline=2,Shadow=0,MarginV=45,Alignment=2'" \
-                  -c:a copy -c:v libx264 -preset medium -crf 23 output/temp_subs.mp4
+                  -c:a copy -c:v libx264 -preset faster -crf 23 output/temp_subs.mp4
               else
                 # Video has no audio yet, don't try to copy audio stream
                 ffmpeg -y -i output/temp.mp4 \
                   -vf "subtitles=output/subs.srt:force_style='FontName=Noto Sans,Bold=1,FontSize=12,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BackColour=&H80000000&,BorderStyle=4,Outline=2,Shadow=0,MarginV=45,Alignment=2'" \
-                  -c:v libx264 -preset medium -crf 23 output/temp_subs.mp4
+                  -c:v libx264 -preset faster -crf 23 output/temp_subs.mp4
               fi
               mv output/temp_subs.mp4 output/temp.mp4
               echo "✅ Multilingual subtitles applied for: English, Hindi, Spanish, French, German, Russian"
             fi
           fi
 
-          # Add voiceover if exists
+          # Add voiceover - NO -shortest flag to preserve full audio
           if [ -f assets/voiceover.mp3 ]; then
             echo "🎤 Validating and adding voiceover..."
             
             # Validate voiceover audio has valid streams and duration
             VO_AUDIO_STREAMS=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 assets/voiceover.mp3 2>/dev/null | wc -l)
-            VO_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null || echo "0")
+            VO_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null)
             
             if [ $VO_AUDIO_STREAMS -eq 0 ]; then
               echo "⚠️  Voiceover file has no audio streams - skipping"
@@ -365,22 +283,22 @@ jobs:
               
               # Validate the re-encoded AAC file
               AAC_STREAMS=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 assets/voiceover_clean.aac 2>/dev/null | wc -l)
-              AAC_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover_clean.aac 2>/dev/null || echo "0")
+              AAC_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover_clean.aac 2>/dev/null)
               
               if [ $AAC_STREAMS -eq 0 ] || ! [[ "$AAC_DUR" =~ ^[0-9]+\.?[0-9]*$ ]] || (( $(echo "$AAC_DUR < 0.1" | bc -l) )); then
                 echo "❌ Re-encoded AAC is invalid (streams: $AAC_STREAMS, duration: $AAC_DUR)"
-              else
-                echo "✅ Re-encoded AAC validated: ${AAC_DUR}s"
-                
-                # Now add the clean voiceover to video
-                ffmpeg -y -i output/temp.mp4 -i assets/voiceover_clean.aac \
-                  -map 0:v -map 1:a \
-                  -c:v copy -c:a copy \
-                  -movflags +faststart \
-                  output/temp_vo.mp4
-                mv output/temp_vo.mp4 output/temp.mp4
-                echo "✅ Voiceover added"
+                exit 1
               fi
+              echo "✅ Re-encoded AAC validated: ${AAC_DUR}s"
+              
+              # Now add the clean voiceover to video
+              ffmpeg -y -i output/temp.mp4 -i assets/voiceover_clean.aac \
+                -map 0:v -map 1:a \
+                -c:v copy -c:a copy \
+                -movflags +faststart \
+                output/temp_vo.mp4
+              mv output/temp_vo.mp4 output/temp.mp4
+              echo "✅ Voiceover added"
             fi
           fi
 
@@ -390,7 +308,7 @@ jobs:
             
             # Validate background music has valid streams and duration
             BG_AUDIO_STREAMS=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 assets/bgmusic.mp3 2>/dev/null | wc -l)
-            BG_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/bgmusic.mp3 2>/dev/null || echo "0")
+            BG_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/bgmusic.mp3 2>/dev/null)
             
             if [ $BG_AUDIO_STREAMS -eq 0 ]; then
               echo "⚠️  Background music has no audio streams - skipping"
@@ -409,55 +327,54 @@ jobs:
               
               # Validate the re-encoded AAC file
               BG_AAC_STREAMS=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 assets/bgmusic_clean.aac 2>/dev/null | wc -l)
-              BG_AAC_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/bgmusic_clean.aac 2>/dev/null || echo "0")
+              BG_AAC_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/bgmusic_clean.aac 2>/dev/null)
               
               if [ $BG_AAC_STREAMS -eq 0 ] || ! [[ "$BG_AAC_DUR" =~ ^[0-9]+\.?[0-9]*$ ]] || (( $(echo "$BG_AAC_DUR < 0.1" | bc -l) )); then
                 echo "❌ Re-encoded background music AAC is invalid (streams: $BG_AAC_STREAMS, duration: $BG_AAC_DUR)"
+                exit 1
+              fi
+              echo "✅ Re-encoded background music validated: ${BG_AAC_DUR}s"
+              
+              HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 output/temp.mp4 2>/dev/null | wc -l)
+              
+              if [ $HAS_AUDIO -gt 0 ]; then
+                # Mix: 80% voiceover + 20% background music
+                ffmpeg -y -i output/temp.mp4 -i assets/bgmusic_clean.aac \
+                  -filter_complex "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[a]" \
+                  -map 0:v -map "[a]" -c:v copy -c:a aac -b:a 192k \
+                  -movflags +faststart \
+                  output/temp_music.mp4
               else
-                echo "✅ Re-encoded background music validated: ${BG_AAC_DUR}s"
-                
-                HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 output/temp.mp4 2>/dev/null | wc -l)
-                
-                if [ $HAS_AUDIO -gt 0 ]; then
-                  # Mix: 80% voiceover + 20% background music
-                  ffmpeg -y -i output/temp.mp4 -i assets/bgmusic_clean.aac \
-                    -filter_complex "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[a]" \
-                    -map 0:v -map "[a]" -c:v copy -c:a aac -b:a 192k \
-                    -movflags +faststart \
-                    output/temp_music.mp4
-                else
-                  # Just add background music at 40%
-                  ffmpeg -y -i output/temp.mp4 -i assets/bgmusic_clean.aac \
-                    -filter_complex "[1:a]volume=0.4[a]" \
-                    -map 0:v -map "[a]" -c:v copy -c:a aac -b:a 192k \
-                    -movflags +faststart \
-                    output/temp_music.mp4
-                fi
-                
-                if [ -f output/temp_music.mp4 ] && [ -s output/temp_music.mp4 ]; then
-                  mv output/temp_music.mp4 output/temp.mp4
-                  echo "✅ Background music added"
-                fi
+                # Just add background music at 40%
+                ffmpeg -y -i output/temp.mp4 -i assets/bgmusic_clean.aac \
+                  -filter_complex "[1:a]volume=0.4[a]" \
+                  -map 0:v -map "[a]" -c:v copy -c:a aac -b:a 192k \
+                  -movflags +faststart \
+                  output/temp_music.mp4
+              fi
+              
+              if [ -f output/temp_music.mp4 ] && [ -s output/temp_music.mp4 ]; then
+                mv output/temp_music.mp4 output/temp.mp4
+                echo "✅ Background music added"
               fi
             fi
           fi
 
           # Final output with optimization
           OUTPUT_NAME=${{ github.event.client_payload.output_name || 'output.mp4' }}
-          
           # Check if video has audio for final encoding
           HAS_AUDIO_FINAL=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 output/temp.mp4 2>/dev/null | wc -l)
           if [ $HAS_AUDIO_FINAL -gt 0 ]; then
             # Video has audio
             ffmpeg -y -i output/temp.mp4 \
-              -c:v libx264 -preset medium -crf 23 \
+              -c:v libx264 -preset faster -crf 23 \
               -c:a aac -b:a 192k \
               -movflags +faststart \
               "output/$OUTPUT_NAME"
           else
             # Video has no audio (video-only)
             ffmpeg -y -i output/temp.mp4 \
-              -c:v libx264 -preset medium -crf 23 \
+              -c:v libx264 -preset faster -crf 23 \
               -movflags +faststart \
               "output/$OUTPUT_NAME"
           fi
@@ -481,7 +398,148 @@ jobs:
           FINAL_SIZE=$(ls -lh "output/$OUTPUT_NAME" | awk '{print $5}')
           echo "📦 Size: $FINAL_SIZE"
 
+      - name: 🎨 Apply watermark (if enabled)
+        if: github.event.client_payload.watermark_enabled == 'true' || github.event.client_payload.watermark_enabled == true
+        run: |
+          set -euo pipefail
+          
+          echo "================================================"
+          echo "🎨 APPLYING WATERMARK TO VIDEO"
+          echo "================================================"
+          
+          OUTPUT_NAME=${{ github.event.client_payload.output_name || 'output.mp4' }}
+          INPUT_VIDEO="output/$OUTPUT_NAME"
+          WATERMARKED_VIDEO="output/${OUTPUT_NAME%.mp4}_watermarked.mp4"
+          
+          WATERMARK_TYPE="${{ github.event.client_payload.watermark_type || 'text' }}"
+          WATERMARK_POSITION="${{ github.event.client_payload.watermark_position || 'bottom-right' }}"
+          WATERMARK_OPACITY="${{ github.event.client_payload.watermark_opacity || '70' }}"
+          
+          if [ "$WATERMARK_TYPE" = "text" ]; then
+            # Text watermark
+            WATERMARK_TEXT="${{ github.event.client_payload.watermark_text || 'YourBrand' }}"
+            WATERMARK_FONTSIZE="${{ github.event.client_payload.watermark_fontsize || '48' }}"
+            WATERMARK_COLOR="${{ github.event.client_payload.watermark_color || '#FFFFFF' }}"
+            
+            # Convert hex color to ffmpeg format (0xRRGGBB)
+            FFMPEG_COLOR="${WATERMARK_COLOR#\#}"
+            FFMPEG_COLOR="0x${FFMPEG_COLOR}"
+            
+            # Calculate opacity for ffmpeg (0-1 scale)
+            OPACITY=$(echo "scale=2; $WATERMARK_OPACITY / 100" | bc)
+            
+            # Calculate position coordinates
+            case "$WATERMARK_POSITION" in
+              "top-left")
+                X_POS="20"
+                Y_POS="20"
+                ;;
+              "top-right")
+                X_POS="(w-text_w-20)"
+                Y_POS="20"
+                ;;
+              "bottom-left")
+                X_POS="20"
+                Y_POS="(h-text_h-20)"
+                ;;
+              "bottom-right")
+                X_POS="(w-text_w-20)"
+                Y_POS="(h-text_h-20)"
+                ;;
+              "center")
+                X_POS="(w-text_w)/2"
+                Y_POS="(h-text_h)/2"
+                ;;
+              *)
+                X_POS="(w-text_w-20)"
+                Y_POS="(h-text_h-20)"
+                ;;
+            esac
+            
+            # Escape special characters in text for ffmpeg
+            ESCAPED_TEXT=$(echo "$WATERMARK_TEXT" | sed "s/'/\\\\'/g" | sed "s/:/\\\\:/g")
+            
+            echo "📝 Text watermark: $WATERMARK_TEXT"
+            echo "📐 Position: $WATERMARK_POSITION"
+            echo "🎨 Color: $WATERMARK_COLOR"
+            echo "📏 Font size: $WATERMARK_FONTSIZE"
+            echo "👁️  Opacity: ${WATERMARK_OPACITY}%"
+            
+            # Apply text watermark
+            ffmpeg -y -i "$INPUT_VIDEO" \
+              -vf "drawtext=text='${ESCAPED_TEXT}':fontsize=${WATERMARK_FONTSIZE}:fontcolor=${FFMPEG_COLOR}@${OPACITY}:x=${X_POS}:y=${Y_POS}" \
+              -c:a copy \
+              -movflags +faststart \
+              "$WATERMARKED_VIDEO"
+              
+          elif [ "$WATERMARK_TYPE" = "image" ]; then
+            # Image watermark
+            WATERMARK_URL="${{ github.event.client_payload.watermark_image_url }}"
+            WATERMARK_SCALE="${{ github.event.client_payload.watermark_scale || '20' }}"
+            
+            if [ -z "$WATERMARK_URL" ]; then
+              echo "❌ Image watermark URL not provided"
+              exit 1
+            fi
+            
+            echo "📥 Downloading watermark image..."
+            curl -L --fail --retry 3 -o assets/watermark.png "$WATERMARK_URL"
+            
+            # Calculate opacity for ffmpeg (0-1 scale)
+            OPACITY=$(echo "scale=2; $WATERMARK_OPACITY / 100" | bc)
+            
+            # Calculate overlay position
+            case "$WATERMARK_POSITION" in
+              "top-left")
+                OVERLAY_POS="x=20:y=20"
+                ;;
+              "top-right")
+                OVERLAY_POS="x=W-w-20:y=20"
+                ;;
+              "bottom-left")
+                OVERLAY_POS="x=20:y=H-h-20"
+                ;;
+              "bottom-right")
+                OVERLAY_POS="x=W-w-20:y=H-h-20"
+                ;;
+              "center")
+                OVERLAY_POS="x=(W-w)/2:y=(H-h)/2"
+                ;;
+              *)
+                OVERLAY_POS="x=W-w-20:y=H-h-20"
+                ;;
+            esac
+            
+            echo "🖼️  Image watermark from URL"
+            echo "📐 Position: $WATERMARK_POSITION"
+            echo "📏 Scale: ${WATERMARK_SCALE}%"
+            echo "👁️  Opacity: ${WATERMARK_OPACITY}%"
+            
+            # Apply image watermark with scaling and opacity
+            ffmpeg -y -i "$INPUT_VIDEO" -i assets/watermark.png \
+              -filter_complex "[1:v]scale=iw*${WATERMARK_SCALE}/100:-1,format=rgba,colorchannelmixer=aa=${OPACITY}[wm];[0:v][wm]overlay=${OVERLAY_POS}" \
+              -c:a copy \
+              -movflags +faststart \
+              "$WATERMARKED_VIDEO"
+          else
+            echo "❌ Invalid watermark type: $WATERMARK_TYPE"
+            exit 1
+          fi
+          
+          # Replace original video with watermarked version
+          if [ -f "$WATERMARKED_VIDEO" ] && [ -s "$WATERMARKED_VIDEO" ]; then
+            mv "$WATERMARKED_VIDEO" "$INPUT_VIDEO"
+            echo "✅ Watermark applied successfully!"
+            
+            WATERMARKED_SIZE=$(ls -lh "$INPUT_VIDEO" | awk '{print $5}')
+            echo "📦 Watermarked video size: $WATERMARKED_SIZE"
+          else
+            echo "❌ Failed to create watermarked video"
+            exit 1
+          fi
+
       - name: 📤 Upload video to backend via webhook
+        id: upload_video
         if: success() && github.event.client_payload.callback_url != '' && github.event.client_payload.callback_url != null
         run: |
           echo "================================================"
@@ -527,15 +585,51 @@ jobs:
           # Check if upload was successful
           if echo "$RESPONSE" | grep -q '"message":"Webhook processed successfully"'; then
             echo "✅ Video uploaded successfully!"
+            echo "upload_success=true" >> $GITHUB_OUTPUT
           else
             echo "⚠️  Upload response: $RESPONSE"
-            echo "❌ Video upload may have failed - check backend logs"
+            echo "❌ Video upload failed - will save as artifact for debugging"
+            echo "upload_success=false" >> $GITHUB_OUTPUT
+            exit 1
           fi
 
-      - name: 📤 Upload video as artifact (fallback)
+      - name: 🗑️ Delete all video, images, audio, and logs (always)
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: video-output
-          path: output/*.mp4
-          retention-days: 7
+        run: |
+          echo "================================================"
+          echo "🗑️  CLEANING UP ALL FILES"
+          echo "================================================"
+          
+          # Delete generated video
+          OUTPUT_NAME=${{ github.event.client_payload.output_name || 'output.mp4' }}
+          if [ -f "output/$OUTPUT_NAME" ]; then
+            rm -f "output/$OUTPUT_NAME"
+            echo "✅ Deleted video: output/$OUTPUT_NAME"
+          fi
+          
+          # Delete all temporary and generated files
+          echo "🗑️  Removing all images, audio, temporary files, and logs..."
+          rm -rf output/* 2>/dev/null || true
+          rm -rf assets/* 2>/dev/null || true
+          rm -rf fixed/* 2>/dev/null || true
+          rm -rf /tmp/*.json 2>/dev/null || true
+          rm -rf /tmp/*.txt 2>/dev/null || true
+          rm -rf /tmp/*.log 2>/dev/null || true
+          rm -rf /tmp/*.mp3 2>/dev/null || true
+          rm -rf /tmp/*.mp4 2>/dev/null || true
+          rm -rf /tmp/*.png 2>/dev/null || true
+          rm -rf /tmp/*.jpg 2>/dev/null || true
+          rm -rf /tmp/*.aac 2>/dev/null || true
+          rm -rf /tmp/*.srt 2>/dev/null || true
+          rm -rf /tmp/ffmpeg*.log 2>/dev/null || true
+          rm -rf /tmp/upload_response.txt 2>/dev/null || true
+          
+          echo "✅ Deleted:"
+          echo "   - Video files (output/*.mp4)"
+          echo "   - Downloaded images (assets/*.png)"
+          echo "   - Processed images (fixed/*.png)"
+          echo "   - Audio files (assets/*.mp3, *.aac)"
+          echo "   - Subtitle files (*.srt)"
+          echo "   - All temporary files and logs"
+          echo ""
+          echo "📝 No files saved to GitHub repository (all deleted immediately)"
